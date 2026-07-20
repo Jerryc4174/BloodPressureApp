@@ -1,5 +1,6 @@
 import os
 import re
+import socket
 from functools import lru_cache
 from urllib.parse import urlsplit, urlunsplit
 
@@ -14,29 +15,6 @@ except Exception:
 
 
 def _get_database_url() -> str:
-    def _normalize_database_url(raw_url: str) -> str:
-        normalized = raw_url.strip()
-        parts = urlsplit(normalized)
-
-        # Common typo: password contains %40, but the auth/host '@' delimiter is missing.
-        if parts.scheme.startswith("postgres") and "@" not in parts.netloc and "%40" in parts.netloc:
-            netloc = parts.netloc
-            split_index = netloc.rfind("%40")
-            if split_index != -1:
-                netloc = f"{netloc[:split_index + 3]}@{netloc[split_index + 3:]}"
-                normalized = urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
-                parts = urlsplit(normalized)
-
-        if not parts.scheme.startswith("postgres") or not parts.hostname:
-            raise RuntimeError(
-                "DATABASE_URL is invalid. Expected format: postgresql://user:password@host:5432/dbname"
-            )
-
-        if parts.scheme in {"postgresql", "postgres"}:
-            normalized = urlunsplit(("postgresql+psycopg", parts.netloc, parts.path, parts.query, parts.fragment))
-
-        return normalized
-
     if st is not None and "DATABASE_URL" in st.secrets:
         return _normalize_database_url(str(st.secrets["DATABASE_URL"]))
 
@@ -45,6 +23,87 @@ def _get_database_url() -> str:
         return _normalize_database_url(database_url)
 
     raise RuntimeError("DATABASE_URL is missing. Set it in .streamlit/secrets.toml or environment variables.")
+
+
+def _normalize_database_url(raw_url: str) -> str:
+    normalized = raw_url.strip()
+    parts = urlsplit(normalized)
+
+    # Common typo: password contains %40, but the auth/host '@' delimiter is missing.
+    if parts.scheme.startswith("postgres") and "@" not in parts.netloc and "%40" in parts.netloc:
+        netloc = parts.netloc
+        split_index = netloc.rfind("%40")
+        if split_index != -1:
+            netloc = f"{netloc[:split_index + 3]}@{netloc[split_index + 3:]}"
+            normalized = urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+            parts = urlsplit(normalized)
+
+    if not parts.scheme.startswith("postgres") or not parts.hostname:
+        raise RuntimeError("DATABASE_URL is invalid. Expected format: postgresql://user:password@host:5432/dbname")
+
+    if parts.scheme in {"postgresql", "postgres"}:
+        normalized = urlunsplit(("postgresql+psycopg", parts.netloc, parts.path, parts.query, parts.fragment))
+
+    return normalized
+
+
+def _get_optional_database_url(secret_name: str) -> str | None:
+    if st is not None and secret_name in st.secrets:
+        return _normalize_database_url(str(st.secrets[secret_name]))
+
+    database_url = os.getenv(secret_name)
+    if database_url:
+        return _normalize_database_url(database_url)
+
+    return None
+
+
+def _candidate_database_urls() -> list[str]:
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    for secret_name in ("DATABASE_URL", "DATABASE_URL_POOLER", "SUPABASE_POOLER_URL", "SUPABASE_DATABASE_URL"):
+        try:
+            candidate = _get_optional_database_url(secret_name)
+        except RuntimeError:
+            continue
+
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            candidates.append(candidate)
+
+    if not candidates:
+        candidates.append(_get_database_url())
+
+    return candidates
+
+
+def _is_dns_resolution_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    dns_markers = (
+        "failed to resolve host",
+        "could not translate host name",
+        "name or service not known",
+        "temporary failure in name resolution",
+        "nodename nor servname provided",
+    )
+    return any(marker in message for marker in dns_markers)
+
+
+def _database_url_hostname(database_url: str) -> str | None:
+    return urlsplit(database_url).hostname
+
+
+def _hostname_resolves(hostname: str | None) -> bool:
+    if not hostname:
+        return False
+
+    try:
+        socket.getaddrinfo(hostname, None)
+    except socket.gaierror:
+        return False
+
+    return True
 
 
 def _migrate_schema(engine: Engine) -> None:
@@ -105,13 +164,45 @@ def _mask_sensitive_details(message: str) -> str:
     masked = re.sub(r"(?i)(password\s*=\s*)[^\s,;]+", r"\1***", masked)
     return masked
 
-    
 
-@lru_cache(maxsize=1)
-def _connect_db() -> Engine:
-    engine = create_engine(_get_database_url(), pool_pre_ping=True, connect_args={"connect_timeout": 10}) 
+@lru_cache(maxsize=None)
+def _build_engine(database_url: str) -> Engine:
+    engine = create_engine(database_url, pool_pre_ping=True, connect_args={"connect_timeout": 10})
     _migrate_schema(engine)
     return engine
+
+
+def _connect_db() -> Engine:
+    candidates = _candidate_database_urls()
+    last_error: Exception | None = None
+
+    for database_url in candidates:
+        hostname = _database_url_hostname(database_url)
+        if hostname and not _hostname_resolves(hostname):
+            last_error = RuntimeError(
+                f"Unable to resolve database host '{hostname}'. Use a pooler or IPv4-capable DATABASE_URL for deployment."
+            )
+            continue
+
+        try:
+            engine = _build_engine(database_url)
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            return engine
+        except Exception as exc:
+            last_error = exc
+            continue
+
+    if last_error is not None:
+        message = _mask_sensitive_details(str(last_error))
+        if _is_dns_resolution_error(last_error) or "resolve" in message.lower():
+            message = (
+                f"{message} Add a Streamlit secret named DATABASE_URL_POOLER or SUPABASE_POOLER_URL, "
+                "or switch DATABASE_URL to a pooler/IPv4-capable Supabase connection string."
+            )
+        raise RuntimeError(message)
+
+    raise RuntimeError("DATABASE_URL is missing. Set it in .streamlit/secrets.toml or environment variables.")
 
 
 def check_db_connection() -> tuple[bool, str]:
