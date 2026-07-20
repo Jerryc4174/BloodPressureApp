@@ -134,6 +134,10 @@ def confirm_delete_dialog() -> None:
 
 def main():
     st.set_page_config(layout="wide")
+    if "DATABASE_URL" in st.secrets:
+        st.write("Secret loaded:", st.secrets["DATABASE_URL"][:10] + "...")
+    else:
+        st.error("DATABASE_URL not found in secrets!")
     # st.markdown(
     #     """
     #     <style>
