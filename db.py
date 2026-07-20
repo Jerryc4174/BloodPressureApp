@@ -105,10 +105,11 @@ def _mask_sensitive_details(message: str) -> str:
     masked = re.sub(r"(?i)(password\s*=\s*)[^\s,;]+", r"\1***", masked)
     return masked
 
+    
 
 @lru_cache(maxsize=1)
 def _connect_db() -> Engine:
-    engine = create_engine(_get_database_url(), pool_pre_ping=True)
+    engine = create_engine(_get_database_url(), pool_pre_ping=True, connect_args={"connect_timeout": 10}) 
     _migrate_schema(engine)
     return engine
 
