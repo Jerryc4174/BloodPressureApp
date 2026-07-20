@@ -36,9 +36,12 @@ def plot_data(df) -> Figure:
         ax.legend(loc='upper left')
 
     # Format the bottom X-axis
+    axes[2].xaxis.set_major_locator(mdates.AutoDateLocator(minticks=4, maxticks=8))
     axes[2].xaxis.set_major_formatter(mdates.DateFormatter('%d/%m/%Y'))
-    axes[2].xaxis.set_major_locator(mdates.WeekdayLocator(interval=1))
-    plt.xticks(rotation=45)
+    axes[2].tick_params(axis='x', labelrotation=45)
+    for label in axes[2].get_xticklabels():
+        label.set_horizontalalignment('right')
     
+    fig.autofmt_xdate(rotation=45, ha='right')
     plt.tight_layout()
     return fig
