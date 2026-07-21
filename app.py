@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 from sqlalchemy.exc import IntegrityError
 
-from db import check_db_connection, date_column_is_timezone_aware, delete_data, load_data, save_data, update_data
+from db import check_db_connection, delete_data, load_data, save_data, update_data
 from plot import plot_data
 
 
@@ -41,6 +41,19 @@ def get_local_timezone() -> tzinfo:
     return timezone.utc
 
 
+def get_app_timezone_name() -> str:
+    configured_tz = st.session_state.get("app_timezone")
+    if configured_tz:
+        return str(configured_tz)
+
+    local_tz = get_local_timezone()
+    tz_key = getattr(local_tz, "key", None)
+    if tz_key:
+        return str(tz_key)
+
+    return "UTC"
+
+
 def render_timezone_selector() -> None:
     if "app_timezone" not in st.session_state:
         default_tz = "UTC"
@@ -64,25 +77,12 @@ def render_timezone_selector() -> None:
 
 
 def local_datetime_to_db_iso(value: datetime, timezone_aware_column: bool) -> str:
-    if not timezone_aware_column:
-        return value.replace(microsecond=0).isoformat(sep=" ")
-
-    local_tz = get_local_timezone()
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=local_tz)
-    else:
-        value = value.astimezone(local_tz)
-
-    return value.astimezone(timezone.utc).isoformat(sep=" ")
+    _ = timezone_aware_column
+    return value.replace(microsecond=0).isoformat(sep=" ")
 
 
 def to_local_editor_datetime(value: object, timezone_aware_column: bool) -> datetime:
-    if timezone_aware_column:
-        utc_value = pd.to_datetime(value, utc=True)
-        local_value = utc_value.tz_convert(get_local_timezone())
-        return local_value.tz_localize(None).to_pydatetime()
-
-    # Timestamp-without-time-zone should be shown exactly as stored.
+    _ = timezone_aware_column
     return pd.to_datetime(value).to_pydatetime()
 
 
@@ -99,7 +99,7 @@ def ensure_add_form_state() -> None:
     if "add_form_date" in st.session_state:
         return
 
-    now = datetime.now().replace(second=0, microsecond=0)
+    now = datetime.now(get_local_timezone()).replace(second=0, microsecond=0, tzinfo=None)
     st.session_state["add_form_date"] = now.date()
     st.session_state["add_form_time"] = now.time()
     st.session_state["add_form_upper"] = ""
@@ -136,7 +136,7 @@ def render_user_selector() -> str:
     return current_user
 
 
-def render_add_entry_form(current_user: str, timezone_aware_column: bool) -> None:
+def render_add_entry_form(current_user: str, app_timezone_name: str, timezone_aware_column: bool) -> None:
     if st.sidebar.button("Add data"):
         st.session_state["show_add_form"] = True
         ensure_add_form_state()
@@ -173,7 +173,14 @@ def render_add_entry_form(current_user: str, timezone_aware_column: bool) -> Non
         return
 
     try:
-        save_data(current_user, local_datetime_to_db_iso(entry_datetime, timezone_aware_column), upper, lower, bpm)
+        save_data(
+            current_user,
+            local_datetime_to_db_iso(entry_datetime, timezone_aware_column),
+            upper,
+            lower,
+            bpm,
+            app_timezone=app_timezone_name,
+        )
     except IntegrityError as exc:
         if is_user_datetime_conflict(exc):
             st.sidebar.error("An entry already exists for this user at the selected date/time.")
@@ -204,6 +211,7 @@ def build_editor_dataframe(df: pd.DataFrame, timezone_aware_column: bool) -> pd.
 
 def save_editor_changes(
     current_user: str,
+    app_timezone_name: str,
     edited_df: pd.DataFrame,
     original_df: pd.DataFrame,
     timezone_aware_column: bool,
@@ -226,6 +234,7 @@ def save_editor_changes(
             upper,
             lower,
             bpm,
+            app_timezone=app_timezone_name,
         )
         updated_count += 1
 
@@ -296,13 +305,14 @@ def main():
     render_timezone_selector()
 
     current_user = render_user_selector()
-    timezone_aware_column = date_column_is_timezone_aware()
+    app_timezone_name = get_app_timezone_name()
+    timezone_aware_column = True
 
-    df = load_data(current_user)
+    df = load_data(current_user, app_timezone=app_timezone_name)
     df.sort_values('Date', inplace=True, ascending=False)
 
     st.title(f"Blood Pressure Data - {current_user}")
-    render_add_entry_form(current_user, timezone_aware_column)
+    render_add_entry_form(current_user, app_timezone_name, timezone_aware_column)
     st.write("Loaded Data:")
     apply_editor_reset()
     editor_df = build_editor_dataframe(df, timezone_aware_column)
@@ -326,7 +336,7 @@ def main():
 
     if st.sidebar.button("Save changes"):
         try:
-            save_editor_changes(current_user, edited_df, editor_df, timezone_aware_column)
+            save_editor_changes(current_user, app_timezone_name, edited_df, editor_df, timezone_aware_column)
         except IntegrityError as exc:
             if is_user_datetime_conflict(exc):
                 st.sidebar.error("Save failed: another entry for this user already uses that date/time.")

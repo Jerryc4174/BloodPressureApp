@@ -293,35 +293,81 @@ def date_column_is_timezone_aware() -> bool:
     return str(data_type).lower() == "timestamp with time zone"
 
 
-def save_data(user_id: str, entry_date: str, upper: int, lower: int, bpm: int) -> None:
+def save_data(user_id: str, entry_date: str, upper: int, lower: int, bpm: int, app_timezone: str | None = None) -> None:
     engine = _connect_db()
+    timezone_aware = date_column_is_timezone_aware()
+
     with engine.begin() as conn:
-        conn.execute(
-            text(
-                'INSERT INTO "data" ("UserId", "Date", "Upper", "Lower", "BPM") '
-                'VALUES (:user_id, :entry_date, :upper, :lower, :bpm)'
-            ),
-            {"user_id": user_id, "entry_date": entry_date, "upper": upper, "lower": lower, "bpm": bpm},
-        )
+        if timezone_aware and app_timezone:
+            conn.execute(
+                text(
+                    'INSERT INTO "data" ("UserId", "Date", "Upper", "Lower", "BPM") '
+                    'VALUES (:user_id, CAST(:entry_date AS timestamp) AT TIME ZONE :app_timezone, :upper, :lower, :bpm)'
+                ),
+                {
+                    "user_id": user_id,
+                    "entry_date": entry_date,
+                    "app_timezone": app_timezone,
+                    "upper": upper,
+                    "lower": lower,
+                    "bpm": bpm,
+                },
+            )
+        else:
+            conn.execute(
+                text(
+                    'INSERT INTO "data" ("UserId", "Date", "Upper", "Lower", "BPM") '
+                    'VALUES (:user_id, :entry_date, :upper, :lower, :bpm)'
+                ),
+                {"user_id": user_id, "entry_date": entry_date, "upper": upper, "lower": lower, "bpm": bpm},
+            )
 
 
-def update_data(user_id: str, entry_id: int, entry_date: str, upper: int, lower: int, bpm: int) -> None:
+def update_data(
+    user_id: str,
+    entry_id: int,
+    entry_date: str,
+    upper: int,
+    lower: int,
+    bpm: int,
+    app_timezone: str | None = None,
+) -> None:
     engine = _connect_db()
+    timezone_aware = date_column_is_timezone_aware()
+
     with engine.begin() as conn:
-        conn.execute(
-            text(
-                'UPDATE "data" SET "Date" = :entry_date, "Upper" = :upper, "Lower" = :lower, "BPM" = :bpm '
-                'WHERE "EntryId" = :entry_id AND "UserId" = :user_id'
-            ),
-            {
-                "entry_date": entry_date,
-                "upper": upper,
-                "lower": lower,
-                "bpm": bpm,
-                "entry_id": entry_id,
-                "user_id": user_id,
-            },
-        )
+        if timezone_aware and app_timezone:
+            conn.execute(
+                text(
+                    'UPDATE "data" SET "Date" = CAST(:entry_date AS timestamp) AT TIME ZONE :app_timezone, '
+                    '"Upper" = :upper, "Lower" = :lower, "BPM" = :bpm '
+                    'WHERE "EntryId" = :entry_id AND "UserId" = :user_id'
+                ),
+                {
+                    "entry_date": entry_date,
+                    "app_timezone": app_timezone,
+                    "upper": upper,
+                    "lower": lower,
+                    "bpm": bpm,
+                    "entry_id": entry_id,
+                    "user_id": user_id,
+                },
+            )
+        else:
+            conn.execute(
+                text(
+                    'UPDATE "data" SET "Date" = :entry_date, "Upper" = :upper, "Lower" = :lower, "BPM" = :bpm '
+                    'WHERE "EntryId" = :entry_id AND "UserId" = :user_id'
+                ),
+                {
+                    "entry_date": entry_date,
+                    "upper": upper,
+                    "lower": lower,
+                    "bpm": bpm,
+                    "entry_id": entry_id,
+                    "user_id": user_id,
+                },
+            )
 
 
 def delete_data(user_id: str, entry_id: int) -> None:
@@ -333,11 +379,24 @@ def delete_data(user_id: str, entry_id: int) -> None:
         )
 
 
-def load_data(user_id: str) -> pd.DataFrame:
+def load_data(user_id: str, app_timezone: str | None = None) -> pd.DataFrame:
     engine = _connect_db()
-    df = pd.read_sql_query(
-        text('SELECT "EntryId", "Date", "Upper", "Lower", "BPM" FROM "data" WHERE "UserId" = :user_id'),
-        engine,
-        params={"user_id": user_id},
-    )
+    timezone_aware = date_column_is_timezone_aware()
+
+    if timezone_aware and app_timezone:
+        df = pd.read_sql_query(
+            text(
+                'SELECT "EntryId", "Date" AT TIME ZONE :app_timezone AS "Date", "Upper", "Lower", "BPM" '
+                'FROM "data" WHERE "UserId" = :user_id'
+            ),
+            engine,
+            params={"user_id": user_id, "app_timezone": app_timezone},
+        )
+    else:
+        df = pd.read_sql_query(
+            text('SELECT "EntryId", "Date", "Upper", "Lower", "BPM" FROM "data" WHERE "UserId" = :user_id'),
+            engine,
+            params={"user_id": user_id},
+        )
+
     return df
