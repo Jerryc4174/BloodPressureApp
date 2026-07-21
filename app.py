@@ -1,6 +1,7 @@
 from datetime import datetime, timezone, tzinfo
+from calendar import monthrange
 from typing import cast
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, available_timezones
 
 import pandas as pd
 import streamlit as st
@@ -8,6 +9,53 @@ from sqlalchemy.exc import IntegrityError
 
 from db import check_db_connection, delete_data, load_data, save_data, update_data
 from plot import plot_data
+
+
+MIN_UPPER = 75
+MAX_UPPER = 250
+MIN_LOWER = 40
+MAX_LOWER = 150
+MIN_BPM = 20
+MAX_BPM = 150
+
+
+def subtract_months(value: datetime, months: int) -> datetime:
+    year = value.year
+    month = value.month - months
+
+    while month <= 0:
+        month += 12
+        year -= 1
+
+    day = min(value.day, monthrange(year, month)[1])
+    return value.replace(year=year, month=month, day=day)
+
+
+def get_entry_datetime_bounds() -> tuple[datetime, datetime]:
+    now_local = datetime.now(get_local_timezone()).replace(tzinfo=None)
+    min_allowed = subtract_months(now_local, 6)
+    return min_allowed, now_local
+
+
+def validate_entry_values(entry_datetime: datetime, upper: int, lower: int, bpm: int) -> str | None:
+    min_allowed, max_allowed = get_entry_datetime_bounds()
+
+    if entry_datetime < min_allowed or entry_datetime > max_allowed:
+        return (
+            "Date/time must be between "
+            f"{min_allowed.strftime('%Y-%m-%d %H:%M')} and {max_allowed.strftime('%Y-%m-%d %H:%M')}."
+        )
+
+    if upper < MIN_UPPER or upper > MAX_UPPER:
+        return f"Upper Blood Pressure must be between {MIN_UPPER} and {MAX_UPPER}."
+
+    if lower < MIN_LOWER or lower > MAX_LOWER:
+        return f"Lower Blood Pressure must be between {MIN_LOWER} and {MAX_LOWER}."
+
+    if bpm < MIN_BPM or bpm > MAX_BPM:
+        return f"BPM must be between {MIN_BPM} and {MAX_BPM}."
+
+    return None
 
 
 def is_user_datetime_conflict(exc: Exception) -> bool:
@@ -55,25 +103,30 @@ def get_app_timezone_name() -> str:
 
 
 def render_timezone_selector() -> None:
+    america_timezones = sorted(tz for tz in available_timezones() if tz.startswith("America/"))
+    if not america_timezones:
+        america_timezones = ["America/New_York"]
+
     if "app_timezone" not in st.session_state:
         default_tz = "America/New_York"
         secret_tz = st.secrets.get("APP_TIMEZONE") if hasattr(st, "secrets") else None
-        if secret_tz:
+        if secret_tz and str(secret_tz) in america_timezones:
             default_tz = str(secret_tz)
         st.session_state["app_timezone"] = default_tz
 
-    timezone_input = st.sidebar.text_input(
-        "App timezone (IANA)",
-        value=str(st.session_state["app_timezone"]),
-        help="Example: America/New_York",
-    ).strip()
+    current_tz = str(st.session_state.get("app_timezone", "America/New_York"))
+    if current_tz not in america_timezones:
+        current_tz = "America/New_York"
+        st.session_state["app_timezone"] = current_tz
 
-    if timezone_input:
-        try:
-            ZoneInfo(timezone_input)
-            st.session_state["app_timezone"] = timezone_input
-        except Exception:
-            st.sidebar.error("Invalid timezone. Example: America/New_York")
+    current_index = america_timezones.index(current_tz)
+    selected_tz = st.sidebar.selectbox(
+        "App timezone",
+        options=america_timezones,
+        index=current_index,
+        help="Select an America/* timezone.",
+    )
+    st.session_state["app_timezone"] = selected_tz
 
 
 def local_datetime_to_db_iso(value: datetime, timezone_aware_column: bool) -> str:
@@ -147,8 +200,17 @@ def render_add_entry_form(current_user: str, app_timezone_name: str, timezone_aw
     ensure_add_form_state()
     st.sidebar.subheader("Add data")
 
+    min_allowed, max_allowed = get_entry_datetime_bounds()
+    min_allowed_date = min_allowed.date()
+    max_allowed_date = max_allowed.date()
+
+    if st.session_state["add_form_date"] < min_allowed_date:
+        st.session_state["add_form_date"] = min_allowed_date
+    if st.session_state["add_form_date"] > max_allowed_date:
+        st.session_state["add_form_date"] = max_allowed_date
+
     with st.sidebar.form("add_entry_form"):
-        st.date_input("Date", key="add_form_date")
+        st.date_input("Date", key="add_form_date", min_value=min_allowed_date, max_value=max_allowed_date)
         st.time_input("Time", key="add_form_time")
         st.text_input("Upper Blood Pressure", key="add_form_upper")
         st.text_input("Lower Blood Pressure", key="add_form_lower")
@@ -170,6 +232,11 @@ def render_add_entry_form(current_user: str, app_timezone_name: str, timezone_aw
         bpm = int(st.session_state["add_form_bpm"])
     except ValueError:
         st.sidebar.error("Upper Blood Pressure, Lower Blood Pressure, and BPM must be whole numbers.")
+        return
+
+    validation_error = validate_entry_values(entry_datetime, upper, lower, bpm)
+    if validation_error:
+        st.sidebar.error(validation_error)
         return
 
     try:
@@ -227,6 +294,10 @@ def save_editor_changes(
             continue
 
         entry_date_local, upper, lower, bpm = normalize_entry_row(edited_row)
+        validation_error = validate_entry_values(entry_date_local, upper, lower, bpm)
+        if validation_error:
+            raise ValueError(f"Row with EntryId {entry_id_int}: {validation_error}")
+
         update_data(
             current_user,
             entry_id_int,
@@ -337,6 +408,9 @@ def main():
     if st.sidebar.button("Save changes"):
         try:
             save_editor_changes(current_user, app_timezone_name, edited_df, editor_df, timezone_aware_column)
+        except ValueError as exc:
+            st.sidebar.error(str(exc))
+            return
         except IntegrityError as exc:
             if is_user_datetime_conflict(exc):
                 st.sidebar.error("Save failed: another entry for this user already uses that date/time.")
