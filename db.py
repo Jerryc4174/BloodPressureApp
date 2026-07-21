@@ -275,6 +275,24 @@ def check_db_connection() -> tuple[bool, str]:
         return False, f"Database connection failed: {_mask_sensitive_details(str(exc))}"
 
 
+def date_column_is_timezone_aware() -> bool:
+    engine = _connect_db()
+    with engine.connect() as conn:
+        data_type = conn.execute(
+            text(
+                """
+                SELECT data_type
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'data'
+                  AND column_name = 'Date'
+                """
+            )
+        ).scalar_one_or_none()
+
+    return str(data_type).lower() == "timestamp with time zone"
+
+
 def save_data(user_id: str, entry_date: str, upper: int, lower: int, bpm: int) -> None:
     engine = _connect_db()
     with engine.begin() as conn:
