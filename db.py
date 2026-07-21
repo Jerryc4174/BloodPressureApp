@@ -158,6 +158,66 @@ def _migrate_schema(engine: Engine) -> None:
             conn.execute(text('UPDATE "data" SET "EntryId" = DEFAULT WHERE "EntryId" IS NULL'))
             conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS data_entryid_uidx ON "data" ("EntryId")'))
 
+        pk_columns = conn.execute(
+            text(
+                """
+                SELECT kcu.column_name
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu
+                  ON tc.constraint_name = kcu.constraint_name
+                 AND tc.table_schema = kcu.table_schema
+                WHERE tc.table_schema = 'public'
+                  AND tc.table_name = 'data'
+                  AND tc.constraint_type = 'PRIMARY KEY'
+                ORDER BY kcu.ordinal_position
+                """
+            )
+        ).scalars().all()
+
+        if pk_columns and pk_columns != ["EntryId"]:
+            conn.execute(
+                text(
+                    """
+                    DO $$
+                    DECLARE pk_name text;
+                    BEGIN
+                        SELECT tc.constraint_name INTO pk_name
+                        FROM information_schema.table_constraints tc
+                        WHERE tc.table_schema = 'public'
+                          AND tc.table_name = 'data'
+                          AND tc.constraint_type = 'PRIMARY KEY'
+                        LIMIT 1;
+
+                        IF pk_name IS NOT NULL THEN
+                            EXECUTE format('ALTER TABLE "data" DROP CONSTRAINT %I', pk_name);
+                        END IF;
+                    END $$;
+                    """
+                )
+            )
+            conn.execute(text('ALTER TABLE "data" ADD PRIMARY KEY ("EntryId")'))
+
+        user_id_exists = conn.execute(
+            text(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'data'
+                      AND column_name = 'UserId'
+                )
+                """
+            )
+        ).scalar_one()
+
+        if not user_id_exists:
+            conn.execute(text('ALTER TABLE "data" ADD COLUMN "UserId" TEXT'))
+
+        conn.execute(text('UPDATE "data" SET "UserId" = :default_user WHERE "UserId" IS NULL'), {"default_user": "Jerry"})
+        conn.execute(text('ALTER TABLE "data" ALTER COLUMN "UserId" SET NOT NULL'))
+        conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS data_userid_date_uidx ON "data" ("UserId", "Date")'))
+
 
 def _mask_sensitive_details(message: str) -> str:
     masked = re.sub(r"://[^@\s]+@", "://***:***@", message)
@@ -215,36 +275,51 @@ def check_db_connection() -> tuple[bool, str]:
         return False, f"Database connection failed: {_mask_sensitive_details(str(exc))}"
 
 
-def save_data(entry_date: str, upper: int, lower: int, bpm: int) -> None:
-    engine = _connect_db()
-    with engine.begin() as conn:
-        conn.execute(
-            text('INSERT INTO "data" ("Date", "Upper", "Lower", "BPM") VALUES (:entry_date, :upper, :lower, :bpm)'),
-            {"entry_date": entry_date, "upper": upper, "lower": lower, "bpm": bpm},
-        )
-
-
-def update_data(entry_id: int, entry_date: str, upper: int, lower: int, bpm: int) -> None:
+def save_data(user_id: str, entry_date: str, upper: int, lower: int, bpm: int) -> None:
     engine = _connect_db()
     with engine.begin() as conn:
         conn.execute(
             text(
-                'UPDATE "data" SET "Date" = :entry_date, "Upper" = :upper, "Lower" = :lower, "BPM" = :bpm WHERE "EntryId" = :entry_id'
+                'INSERT INTO "data" ("UserId", "Date", "Upper", "Lower", "BPM") '
+                'VALUES (:user_id, :entry_date, :upper, :lower, :bpm)'
             ),
-            {"entry_date": entry_date, "upper": upper, "lower": lower, "bpm": bpm, "entry_id": entry_id},
+            {"user_id": user_id, "entry_date": entry_date, "upper": upper, "lower": lower, "bpm": bpm},
         )
 
 
-def delete_data(entry_id: int) -> None:
+def update_data(user_id: str, entry_id: int, entry_date: str, upper: int, lower: int, bpm: int) -> None:
     engine = _connect_db()
     with engine.begin() as conn:
-        conn.execute(text('DELETE FROM "data" WHERE "EntryId" = :entry_id'), {"entry_id": entry_id})
+        conn.execute(
+            text(
+                'UPDATE "data" SET "Date" = :entry_date, "Upper" = :upper, "Lower" = :lower, "BPM" = :bpm '
+                'WHERE "EntryId" = :entry_id AND "UserId" = :user_id'
+            ),
+            {
+                "entry_date": entry_date,
+                "upper": upper,
+                "lower": lower,
+                "bpm": bpm,
+                "entry_id": entry_id,
+                "user_id": user_id,
+            },
+        )
 
 
-def load_data() -> pd.DataFrame:
+def delete_data(user_id: str, entry_id: int) -> None:
+    engine = _connect_db()
+    with engine.begin() as conn:
+        conn.execute(
+            text('DELETE FROM "data" WHERE "EntryId" = :entry_id AND "UserId" = :user_id'),
+            {"entry_id": entry_id, "user_id": user_id},
+        )
+
+
+def load_data(user_id: str) -> pd.DataFrame:
     engine = _connect_db()
     df = pd.read_sql_query(
-        text('SELECT "EntryId", "Date", "Upper", "Lower", "BPM" FROM "data"'),
+        text('SELECT "EntryId", "Date", "Upper", "Lower", "BPM" FROM "data" WHERE "UserId" = :user_id'),
         engine,
+        params={"user_id": user_id},
     )
     return df

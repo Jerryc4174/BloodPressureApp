@@ -3,9 +3,19 @@ from typing import cast
 
 import pandas as pd
 import streamlit as st
+from sqlalchemy.exc import IntegrityError
 
 from db import check_db_connection, delete_data, load_data, save_data, update_data
 from plot import plot_data
+
+
+def is_user_datetime_conflict(exc: Exception) -> bool:
+    message = str(exc)
+    return (
+        "data_userid_date_uidx" in message
+        or 'Key (UserId, Date)=' in message
+        or 'duplicate key value violates unique constraint' in message
+    )
 
 
 def request_editor_reset() -> None:
@@ -29,7 +39,34 @@ def ensure_add_form_state() -> None:
     st.session_state["add_form_bpm"] = ""
 
 
-def render_add_entry_form() -> None:
+def render_user_selector() -> str:
+    if "current_user" not in st.session_state:
+        st.title("Blood Pressure Data")
+        st.subheader("Select user")
+        col1, col2 = st.columns(2)
+
+        with col1:
+            if st.button("Jerry", type="primary", use_container_width=True):
+                st.session_state["current_user"] = "Jerry"
+                st.rerun()
+
+        with col2:
+            if st.button("Wanda", type="primary", use_container_width=True):
+                st.session_state["current_user"] = "Wanda"
+                st.rerun()
+
+        st.stop()
+
+    current_user = str(st.session_state["current_user"])
+    st.sidebar.caption(f"Current user: {current_user}")
+    if st.sidebar.button("Switch user"):
+        st.session_state.pop("current_user", None)
+        st.rerun()
+
+    return current_user
+
+
+def render_add_entry_form(current_user: str) -> None:
     if st.sidebar.button("Add data"):
         st.session_state["show_add_form"] = True
         ensure_add_form_state()
@@ -65,7 +102,15 @@ def render_add_entry_form() -> None:
         st.sidebar.error("Upper Blood Pressure, Lower Blood Pressure, and BPM must be whole numbers.")
         return
 
-    save_data(entry_datetime.isoformat(sep=" "), upper, lower, bpm)
+    try:
+        save_data(current_user, entry_datetime.isoformat(sep=" "), upper, lower, bpm)
+    except IntegrityError as exc:
+        if is_user_datetime_conflict(exc):
+            st.sidebar.error("An entry already exists for this user at the selected date/time.")
+        else:
+            st.sidebar.error("Unable to save data due to a database constraint.")
+        return
+
     st.session_state["show_add_form"] = False
     request_editor_reset()
     st.rerun()
@@ -87,7 +132,7 @@ def build_editor_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return editor_df
 
 
-def save_editor_changes(edited_df: pd.DataFrame, original_df: pd.DataFrame) -> int:
+def save_editor_changes(current_user: str, edited_df: pd.DataFrame, original_df: pd.DataFrame) -> int:
     original_by_id = original_df.set_index("EntryId")
     edited_by_id = edited_df.set_index("EntryId")
     updated_count = 0
@@ -99,7 +144,7 @@ def save_editor_changes(edited_df: pd.DataFrame, original_df: pd.DataFrame) -> i
             continue
 
         entry_date, upper, lower, bpm = normalize_entry_row(edited_row)
-        update_data(entry_id_int, entry_date, upper, lower, bpm)
+        update_data(current_user, entry_id_int, entry_date, upper, lower, bpm)
         updated_count += 1
 
     return updated_count
@@ -113,7 +158,7 @@ def get_delete_ids(edited_df: pd.DataFrame) -> list[int]:
 
 
 @st.dialog("Confirm delete")
-def confirm_delete_dialog() -> None:
+def confirm_delete_dialog(current_user: str) -> None:
     delete_ids = st.session_state.get("pending_delete_ids", [])
     st.write(f"Delete {len(delete_ids)} selected entr{'y' if len(delete_ids) == 1 else 'ies'}?")
     confirm_col, cancel_col = st.columns(2)
@@ -121,7 +166,7 @@ def confirm_delete_dialog() -> None:
     with confirm_col:
         if st.button("Delete", type="primary"):
             for entry_id in delete_ids:
-                delete_data(int(entry_id))
+                delete_data(current_user, int(entry_id))
             st.session_state["pending_delete_ids"] = []
             request_editor_reset()
             st.rerun()
@@ -166,11 +211,13 @@ def main():
         st.sidebar.error(db_message)
         st.stop()
 
-    df = load_data()
+    current_user = render_user_selector()
+
+    df = load_data(current_user)
     df.sort_values('Date', inplace=True, ascending=False)
 
-    st.title("Blood Pressure Data")
-    render_add_entry_form()
+    st.title(f"Blood Pressure Data - {current_user}")
+    render_add_entry_form(current_user)
     st.write("Loaded Data:")
     apply_editor_reset()
     editor_df = build_editor_dataframe(df)
@@ -193,7 +240,14 @@ def main():
     )
 
     if st.sidebar.button("Save changes"):
-        save_editor_changes(edited_df, df)
+        try:
+            save_editor_changes(current_user, edited_df, df)
+        except IntegrityError as exc:
+            if is_user_datetime_conflict(exc):
+                st.sidebar.error("Save failed: another entry for this user already uses that date/time.")
+            else:
+                st.sidebar.error("Save failed due to a database constraint.")
+            return
         request_editor_reset()
         st.rerun()
 
@@ -203,7 +257,7 @@ def main():
             st.sidebar.warning("Check one or more Delete boxes first.")
         else:
             st.session_state["pending_delete_ids"] = delete_ids
-            confirm_delete_dialog()
+            confirm_delete_dialog(current_user)
 
     if df.empty:
         st.info("No blood pressure entries available.")
