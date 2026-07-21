@@ -1,5 +1,6 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import cast
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -16,6 +17,40 @@ def is_user_datetime_conflict(exc: Exception) -> bool:
         or 'Key (UserId, Date)=' in message
         or 'duplicate key value violates unique constraint' in message
     )
+
+
+def get_local_timezone() -> ZoneInfo:
+    configured_tz = st.secrets.get("APP_TIMEZONE") if hasattr(st, "secrets") else None
+    if configured_tz:
+        return ZoneInfo(str(configured_tz))
+
+    local_tzinfo = datetime.now().astimezone().tzinfo
+    if local_tzinfo is None:
+        return ZoneInfo("UTC")
+
+    tz_key = getattr(local_tzinfo, "key", None)
+    if tz_key:
+        return ZoneInfo(str(tz_key))
+
+    # Fallback when system tzinfo has no zone key.
+    return ZoneInfo("UTC")
+
+
+def local_datetime_to_utc_iso(value: datetime) -> str:
+    local_tz = get_local_timezone()
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=local_tz)
+    else:
+        value = value.astimezone(local_tz)
+
+    return value.astimezone(timezone.utc).isoformat(sep=" ")
+
+
+def to_local_editor_datetime(value: object) -> datetime:
+    # DB values are treated as UTC and converted to local wall time for UI.
+    utc_value = pd.to_datetime(value, utc=True)
+    local_value = utc_value.tz_convert(get_local_timezone())
+    return local_value.tz_localize(None).to_pydatetime()
 
 
 def request_editor_reset() -> None:
@@ -59,6 +94,7 @@ def render_user_selector() -> str:
 
     current_user = str(st.session_state["current_user"])
     st.sidebar.caption(f"Current user: {current_user}")
+    st.sidebar.caption(f"Timezone: {get_local_timezone().key}")
     if st.sidebar.button("Switch user"):
         st.session_state.pop("current_user", None)
         st.rerun()
@@ -103,7 +139,7 @@ def render_add_entry_form(current_user: str) -> None:
         return
 
     try:
-        save_data(current_user, entry_datetime.isoformat(sep=" "), upper, lower, bpm)
+        save_data(current_user, local_datetime_to_utc_iso(entry_datetime), upper, lower, bpm)
     except IntegrityError as exc:
         if is_user_datetime_conflict(exc):
             st.sidebar.error("An entry already exists for this user at the selected date/time.")
@@ -116,9 +152,9 @@ def render_add_entry_form(current_user: str) -> None:
     st.rerun()
 
 
-def normalize_entry_row(row: pd.Series) -> tuple[str, int, int, int]:
+def normalize_entry_row(row: pd.Series) -> tuple[datetime, int, int, int]:
     return (
-        pd.to_datetime(row["Date"]).isoformat(sep=" "),
+        pd.to_datetime(row["Date"]).to_pydatetime().replace(microsecond=0),
         int(row["Upper"]),
         int(row["Lower"]),
         int(row["BPM"]),
@@ -127,7 +163,7 @@ def normalize_entry_row(row: pd.Series) -> tuple[str, int, int, int]:
 
 def build_editor_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     editor_df = df.copy()
-    editor_df["Date"] = pd.to_datetime(editor_df["Date"])
+    editor_df["Date"] = editor_df["Date"].map(to_local_editor_datetime)
     editor_df["Delete"] = False
     return editor_df
 
@@ -143,8 +179,8 @@ def save_editor_changes(current_user: str, edited_df: pd.DataFrame, original_df:
         if normalize_entry_row(edited_row) == normalize_entry_row(original_row):
             continue
 
-        entry_date, upper, lower, bpm = normalize_entry_row(edited_row)
-        update_data(current_user, entry_id_int, entry_date, upper, lower, bpm)
+        entry_date_local, upper, lower, bpm = normalize_entry_row(edited_row)
+        update_data(current_user, entry_id_int, local_datetime_to_utc_iso(entry_date_local), upper, lower, bpm)
         updated_count += 1
 
     return updated_count
@@ -241,7 +277,7 @@ def main():
 
     if st.sidebar.button("Save changes"):
         try:
-            save_editor_changes(current_user, edited_df, df)
+            save_editor_changes(current_user, edited_df, editor_df)
         except IntegrityError as exc:
             if is_user_datetime_conflict(exc):
                 st.sidebar.error("Save failed: another entry for this user already uses that date/time.")
@@ -264,7 +300,7 @@ def main():
         return
 
     st.write("Blood Pressure Plots:")
-    fig = plot_data(df)
+    fig = plot_data(editor_df.drop(columns=["Delete"]))
     st.pyplot(fig)
 
 
