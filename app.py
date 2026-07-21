@@ -56,7 +56,7 @@ def get_app_timezone_name() -> str:
 
 def render_timezone_selector() -> None:
     if "app_timezone" not in st.session_state:
-        default_tz = "UTC"
+        default_tz = "America/New_York"
         secret_tz = st.secrets.get("APP_TIMEZONE") if hasattr(st, "secrets") else None
         if secret_tz:
             default_tz = str(secret_tz)
