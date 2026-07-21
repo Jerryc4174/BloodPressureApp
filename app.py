@@ -1,6 +1,5 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 from typing import cast
-from typing import tzinfo as tzinfo_type
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -20,7 +19,7 @@ def is_user_datetime_conflict(exc: Exception) -> bool:
     )
 
 
-def get_local_timezone() -> tzinfo_type:
+def get_local_timezone() -> tzinfo:
     configured_tz = st.secrets.get("APP_TIMEZONE") if hasattr(st, "secrets") else None
     if configured_tz:
         return ZoneInfo(str(configured_tz))
