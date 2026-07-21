@@ -20,15 +20,47 @@ def is_user_datetime_conflict(exc: Exception) -> bool:
 
 
 def get_local_timezone() -> tzinfo:
-    configured_tz = st.secrets.get("APP_TIMEZONE") if hasattr(st, "secrets") else None
+    configured_tz = st.session_state.get("app_timezone")
     if configured_tz:
-        return ZoneInfo(str(configured_tz))
+        try:
+            return ZoneInfo(str(configured_tz))
+        except Exception:
+            pass
+
+    secret_tz = st.secrets.get("APP_TIMEZONE") if hasattr(st, "secrets") else None
+    if secret_tz:
+        try:
+            return ZoneInfo(str(secret_tz))
+        except Exception:
+            pass
 
     local_tzinfo = datetime.now().astimezone().tzinfo
     if local_tzinfo is not None:
         return local_tzinfo
 
     return timezone.utc
+
+
+def render_timezone_selector() -> None:
+    if "app_timezone" not in st.session_state:
+        default_tz = "UTC"
+        secret_tz = st.secrets.get("APP_TIMEZONE") if hasattr(st, "secrets") else None
+        if secret_tz:
+            default_tz = str(secret_tz)
+        st.session_state["app_timezone"] = default_tz
+
+    timezone_input = st.sidebar.text_input(
+        "App timezone (IANA)",
+        value=str(st.session_state["app_timezone"]),
+        help="Example: America/New_York",
+    ).strip()
+
+    if timezone_input:
+        try:
+            ZoneInfo(timezone_input)
+            st.session_state["app_timezone"] = timezone_input
+        except Exception:
+            st.sidebar.error("Invalid timezone. Example: America/New_York")
 
 
 def local_datetime_to_db_iso(value: datetime, timezone_aware_column: bool) -> str:
@@ -260,6 +292,8 @@ def main():
     else:
         st.sidebar.error(db_message)
         st.stop()
+
+    render_timezone_selector()
 
     current_user = render_user_selector()
     timezone_aware_column = date_column_is_timezone_aware()
